@@ -40,8 +40,12 @@ first, in that file's order, then other followed channels by viewers. Uploads
 from your YouTube channels come before uploads from other subscriptions, which
 start collapsed. Type to filter, use Up and Down to move through
 the list, press Enter to open the selected item, and press Escape to clear the
-filter or close the panel. Press Shift+Enter, or right-click, to mark a YouTube
-upload or a saved item watched. Press Ctrl+R to recheck every source.
+filter or close the panel. Press Shift+Enter, or click a video's checkmark, to
+mark a YouTube video or a saved item watched. The checkmark on a section
+heading marks the whole section watched. Right-click an item, or press the
+Menu key or Shift+F10, to
+open it or its channel, add the channel to your channels or mark it watched.
+Press Ctrl+R to recheck every source.
 
 Middle-click the widget to recheck. Right-click it to restart the daemon.
 

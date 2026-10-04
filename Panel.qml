@@ -52,6 +52,8 @@ Panel {
   property string focusedSource: ""
   // Refreshed while the panel is open, so relative times stay current.
   property double now: Date.now()
+  // The item the right-click menu is open on.
+  property var menuEntry: null
 
   readonly property var panelRows: buildPanelRows()
   readonly property var filteredHeaderActions: filterRows("header-action")
@@ -166,6 +168,10 @@ Panel {
         title: section.title,
         count: rows.length,
         toggleKey: "toggle:" + section.kind,
+        markAllKey: "mark-all:" + section.kind,
+        // What "mark all as watched" covers: the section's videos that match
+        // the filter, collapsed or not.
+        markable: rows.filter(function(entry) { return canMarkWatched(entry.value) }),
         rows: filterController.filterText || expanded[section.kind] ? rows : []
       }
     }).filter(function(section) { return section.count > 0 })
@@ -177,9 +183,18 @@ Panel {
       var section = filteredSections[i]
       if (!filterController.filterText)
         rows.push({ key: section.toggleKey, kind: "toggle", section: section.kind })
+      if (section.markable.length > 0)
+        rows.push({ key: section.markAllKey, kind: "mark-all", section: section.kind })
       rows = rows.concat(section.rows)
     }
     return rows
+  }
+
+  function markAllWatched(kind) {
+    if (!service) return
+    var section = filteredSections.find(function(each) { return each.kind === kind })
+    if (!section) return
+    service.markWatched(section.markable.map(function(entry) { return entry.value.item }))
   }
 
   function toggleSection(kind) {
@@ -202,13 +217,15 @@ Panel {
   }
 
   // Opens on Twitch live channels or YouTube uploads, with the first one
-  // selected and its section scrolled to the top.
+  // selected and its section scrolled to the top. Other uploads stay
+  // collapsed.
   function openOn(source) {
     var wanted = source === "twitch" ? ["live", "followed"] : ["upload", "other"]
+    var expand = source === "twitch" ? ["live", "followed"] : ["upload"]
     open()
     focusedSource = source
     var next = Object.assign({}, expanded)
-    for (var i = 0; i < wanted.length; i++) next[wanted[i]] = true
+    for (var i = 0; i < expand.length; i++) next[expand[i]] = true
     expanded = next
     Qt.callLater(function() {
       for (var j = 0; j < filteredSections.length; j++) {
@@ -257,7 +274,7 @@ Panel {
       if (section.kind !== entry.section) continue
       var sectionItem = sectionRepeater.itemAt(i)
       if (!sectionItem) return null
-      if (entry.kind === "toggle") return sectionItem.heading
+      if (entry.kind === "toggle" || entry.kind === "mark-all") return sectionItem.heading
       return sectionItem.rowAt(section.rows.indexOf(entry))
     }
     return null
@@ -302,12 +319,12 @@ Panel {
     }
   }
 
+  // Saved items, and any YouTube video, live or not. Twitch streams can't be.
   function canMarkWatched(entry) {
-    return entry.item.kind === "saved"
-      || (entry.item.kind === "upload" && entry.item.source === "youtube")
+    return entry.item.kind === "saved" || entry.item.source === "youtube"
   }
 
-  // Opens the item, or with Shift or a right-click marks it watched.
+  // Opens the item, or with Shift marks it watched.
   function activateItem(entry, markWatched) {
     if (!service) return
     if (markWatched) {
@@ -316,6 +333,41 @@ Panel {
     }
     service.openUrl(entry.item.url)
     close()
+  }
+
+  // What the item menu offers. Channels you don't track yet can be added.
+  function itemActions(entry) {
+    if (!entry) return []
+    var actions = [{ id: "open", label: entry.item.kind === "live" ? "Watch" : "Open" }]
+    if (entry.item.channel && entry.item.channel.url)
+      actions.push({ id: "channel", label: "Open " + entry.item.channel.name })
+    if (entry.tracked !== true && (entry.item.source === "twitch" || entry.item.source === "youtube"))
+      actions.push({ id: "add", label: "Add " + entry.item.channel.name + " to your channels" })
+    if (canMarkWatched(entry)) actions.push({ id: "watched", label: "Mark as watched" })
+    return actions
+  }
+
+  signal itemMenuRequested(string key)
+
+  function openItemMenu(entry, anchor, x, y) {
+    if (!service) return
+    menuEntry = entry
+    var point = anchor.mapToItem(filterController, x, y)
+    itemMenu.x = Math.max(0, Math.min(point.x, filterController.width - itemMenu.width))
+    itemMenu.y = Math.max(0, Math.min(point.y, filterController.height - itemMenu.implicitHeight))
+    itemMenu.open()
+  }
+
+  function runItemAction(action) {
+    var entry = menuEntry
+    itemMenu.close()
+    if (!entry || !service) return
+    if (action === "open") activateItem(entry, false)
+    else if (action === "channel") {
+      service.openUrl(entry.item.channel.url)
+      close()
+    } else if (action === "add") service.addChannel(entry.item)
+    else if (action === "watched") service.markWatched(entry.item)
   }
 
   function activateAttention(status) {
@@ -329,6 +381,7 @@ Panel {
     else if (entry.kind === "attention") activateAttention(entry.value)
     else if (entry.kind === "item") activateItem(entry.value, (modifiers & Qt.ShiftModifier) !== 0)
     else if (entry.kind === "toggle") toggleSection(entry.section)
+    else if (entry.kind === "mark-all") markAllWatched(entry.section)
   }
 
   KeyboardPanel {
@@ -348,6 +401,7 @@ Panel {
       navigationModel: root.navigationRows
       onRevealRequested: revealTimer.restart()
       onActivateRequested: function(entry, modifiers) { root.activateEntry(entry, modifiers) }
+      onMenuRequested: function(entry) { if (entry.kind === "item") root.itemMenuRequested(entry.key) }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onRefreshRequested: root.activateAction(0)
@@ -586,6 +640,23 @@ Panel {
                   + (filterController.filterText ? " MATCHING" : "")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
+                trailingControl: sectionColumn.modelData.markable.length > 0 ? markAllButton : null
+
+                Component {
+                  id: markAllButton
+                  PanelActionButton {
+                    iconText: "󰄬"
+                    tooltipText: "Mark all " + sectionColumn.modelData.markable.length
+                      + (filterController.filterText ? " matching" : "") + " as watched"
+                    foreground: root.contentForeground
+                    fontFamily: root.contentFontFamily
+                    hasCursor: filterController.cursorIndex === filterController.indexForKey(sectionColumn.modelData.markAllKey)
+                    onHovered: function(hovered) {
+                      if (hovered) filterController.cursorIndex = filterController.indexForKey(sectionColumn.modelData.markAllKey)
+                    }
+                    onClicked: root.markAllWatched(sectionColumn.modelData.kind)
+                  }
+                }
 
                 MouseArea {
                   anchors.fill: parent
@@ -620,6 +691,7 @@ Panel {
               readonly property var item: entry.item
               readonly property bool live: item.kind === "live"
               readonly property var thumbnail: root.service ? root.service.thumbnailFor(item) : null
+              readonly property bool markable: root.canMarkWatched(entry)
               width: contentColumn.width
               implicitHeight: itemColumn.implicitHeight + Style.space(12)
               hasCursor: filterController.cursorIndex === filterController.indexForKey(modelData.key)
@@ -627,6 +699,10 @@ Panel {
               accent: live ? root.sourceColor(item.source) : root.contentForeground
 
               Row {
+                id: itemRow
+                // Above the row's MouseArea, so the watched button gets its
+                // clicks. Everything else in it lets clicks through.
+                z: 1
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
@@ -668,7 +744,7 @@ Panel {
 
                 Column {
                   id: itemColumn
-                  width: Math.max(0, parent.width - Style.space(124))
+                  width: Math.max(0, parent.width - Style.space(124) - (itemSurface.markable ? watchedButton.width + itemRow.spacing : 0))
                   spacing: Style.space(2)
 
                   Text {
@@ -702,6 +778,17 @@ Panel {
                   }
                 }
 
+                PanelActionButton {
+                  id: watchedButton
+                  visible: itemSurface.markable
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: "󰄬"
+                  tooltipText: "Mark as watched"
+                  foreground: root.contentForeground
+                  fontFamily: root.contentFontFamily
+                  onClicked: if (root.service) root.service.markWatched(itemSurface.item)
+                }
+
                 Text {
                   width: Style.space(20)
                   text: itemSurface.entry.autoOpen === true ? "󰉁" : root.sourceIcon(itemSurface.item.source)
@@ -721,7 +808,17 @@ Panel {
                 cursorShape: Qt.PointingHandCursor
                 onEntered: filterController.cursorIndex = filterController.indexForKey(itemSurface.modelData.key)
                 onClicked: function(mouse) {
-                  root.activateItem(itemSurface.entry, mouse.button === Qt.RightButton)
+                  if (mouse.button === Qt.RightButton)
+                    root.openItemMenu(itemSurface.entry, itemSurface, mouse.x, mouse.y)
+                  else root.activateItem(itemSurface.entry, false)
+                }
+              }
+
+              Connections {
+                target: root
+                function onItemMenuRequested(key) {
+                  if (key === itemSurface.modelData.key)
+                    root.openItemMenu(itemSurface.entry, itemSurface, Style.space(80), itemSurface.height)
                 }
               }
             }
@@ -737,6 +834,92 @@ Panel {
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.body
             horizontalAlignment: Text.AlignHCenter
+          }
+        }
+      }
+
+      Popup {
+        id: itemMenu
+        readonly property var menuBorderSpec: Border.localOrSurfaceSpec("popups", "border", Color.popups.border, Color.popups.border, Style.normalBorderWidth)
+        width: Style.space(260)
+        implicitHeight: itemMenu.contentItem.contentHeight + topPadding + bottomPadding
+        padding: Style.spacing.hairline
+        leftPadding: Border.left(menuBorderSpec) + Style.spacing.hairline
+        rightPadding: Border.right(menuBorderSpec) + Style.spacing.hairline
+        topPadding: Border.top(menuBorderSpec) + Style.spacing.hairline
+        bottomPadding: Border.bottom(menuBorderSpec) + Style.spacing.hairline
+        focus: true
+
+        background: BorderSurface {
+          color: Color.popups.background
+          borderSpec: itemMenu.menuBorderSpec
+          radius: Style.cornerRadius
+        }
+
+        onOpened: {
+          itemMenu.contentItem.currentIndex = 0
+          itemMenu.contentItem.forceActiveFocus()
+        }
+        onClosed: {
+          root.menuEntry = null
+          filterController.forceActiveFocus()
+        }
+
+        // No id here: an id on a Popup's contentItem makes qmllint hang, so
+        // the list is reached through itemMenu.contentItem.
+        contentItem: ListView {
+          implicitHeight: contentHeight
+          interactive: false
+          model: root.itemActions(root.menuEntry)
+          currentIndex: 0
+
+          Keys.priority: Keys.BeforeItem
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Escape || event.key === Qt.Key_Menu) {
+              itemMenu.close()
+              event.accepted = true
+            } else if (event.key === Qt.Key_Down || event.text === "j") {
+              itemMenu.contentItem.currentIndex = Math.min(itemMenu.contentItem.count - 1, itemMenu.contentItem.currentIndex + 1)
+              event.accepted = true
+            } else if (event.key === Qt.Key_Up || event.text === "k") {
+              itemMenu.contentItem.currentIndex = Math.max(0, itemMenu.contentItem.currentIndex - 1)
+              event.accepted = true
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+              if (itemMenu.contentItem.currentIndex >= 0) root.runItemAction(itemMenu.contentItem.model[itemMenu.contentItem.currentIndex].id)
+              event.accepted = true
+            }
+          }
+
+          delegate: Rectangle {
+            required property var modelData
+            required property int index
+            width: itemMenu.contentItem.width
+            height: Style.spacing.popupRowHeight
+            color: index === itemMenu.contentItem.currentIndex
+              ? Style.hoverFillFor(root.contentForeground, root.contentForeground)
+              : "transparent"
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.spacing.controlPaddingX
+              anchors.rightMargin: Style.spacing.controlPaddingX
+              text: parent.modelData.label
+              color: root.contentForeground
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onPositionChanged: itemMenu.contentItem.currentIndex = parent.index
+              onClicked: root.runItemAction(parent.modelData.id)
+            }
           }
         }
       }

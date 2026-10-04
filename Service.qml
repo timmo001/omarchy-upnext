@@ -134,9 +134,21 @@ Item {
     runAction(restartCommand)
   }
 
-  function markWatched(item) {
+  // Takes one item or a list, and marks them in a single call.
+  function markWatched(items) {
+    var list = [].concat(items).filter(function(item) { return !!item })
+    if (list.length === 0 || !connected) return
+    Quickshell.execDetached(command(["watched"].concat(list.map(function(item) { return String(item.id) }))))
+  }
+
+  // Adds the item's channel to channels.yml. Twitch takes the login, which is
+  // in the item id, and YouTube the channel ID.
+  function addChannel(item) {
     if (!item || !connected) return
-    Quickshell.execDetached(command(["watched", String(item.id)]))
+    var name = item.source === "twitch"
+      ? String(item.id).replace(/^twitch:/, "")
+      : String(item.channel.id)
+    Quickshell.execDetached(command(["channel", "add", String(item.source), name]))
   }
 
   function signIn(source) {
